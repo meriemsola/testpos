@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:testpos/main.dart'; // pour accéder à HomeScreen
 
 class AmountPage extends StatefulWidget {
   const AmountPage({Key? key}) : super(key: key);
@@ -19,7 +20,22 @@ class _AmountPageState extends State<AmountPage> {
   }
 
   void _onConfirm() {
-    Navigator.pushNamed(context, '/nfcWaiting', arguments: {'amount': amount});
+    Navigator.pushNamed(
+      context,
+      '/nfcWaiting',
+      arguments: {
+        'amount': amount,
+        'startSession': () {
+          print('📲 Lancement de HomeScreen avec montant = $amount');
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => HomeScreen(initialAmount: amount),
+            ),
+          );
+        },
+      },
+    );
   }
 
   @override
@@ -31,7 +47,10 @@ class _AmountPageState extends State<AmountPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            const Text('💰 Entrez le montant', style: TextStyle(fontSize: 20)),
+            const Text(
+              '\u{1F4B0} Entrez le montant',
+              style: TextStyle(fontSize: 20),
+            ),
             const SizedBox(height: 12),
             TextField(
               controller: amountController,

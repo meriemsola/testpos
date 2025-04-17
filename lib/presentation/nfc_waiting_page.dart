@@ -21,10 +21,16 @@ class _NfcWaitingPageState extends State<NfcWaitingPage> {
       result = args['result'] ?? '';
       pan = args['pan'] ?? '';
 
-      // ✅ Appeler automatiquement _startEMVSession si fourni
+      print('📦 Arguments reçus dans NFC Waiting : $args');
+
       Future.microtask(() {
         final Function()? startSession = args['startSession'];
-        if (startSession != null) startSession();
+        if (startSession != null) {
+          print('📡 Lancement de startSession() depuis NfcWaitingPage');
+          startSession();
+        } else {
+          print('⚠️ startSession est null');
+        }
       });
     } else {
       amount = '0.00';
@@ -32,7 +38,6 @@ class _NfcWaitingPageState extends State<NfcWaitingPage> {
       pan = '';
     }
 
-    // ✅ Redirection vers résumé après succès
     if (result.contains('acceptée') || result.contains('approuvée')) {
       Future.delayed(const Duration(seconds: 2), () {
         Navigator.pushNamed(
@@ -87,7 +92,7 @@ class _NfcWaitingPageState extends State<NfcWaitingPage> {
                 ),
                 const SizedBox(height: 30),
                 Text(
-                  'Amount: \$${amount}',
+                  'Amount: ${amount}',
                   style: const TextStyle(
                     fontSize: 26,
                     fontWeight: FontWeight.bold,

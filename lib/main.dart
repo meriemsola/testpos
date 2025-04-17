@@ -34,8 +34,9 @@ void main() {
 }
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final String? initialAmount;
 
+  const HomeScreen({super.key, this.initialAmount});
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -142,9 +143,19 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 📘 Étapes 1 à 13 : Processus EMV complet
   void _startEMVSession() async {
+    // ✅ Étape 0 : Vérifie si le montant est valide
     if (!_isValidAmount(amount)) {
       setState(() {
         result = '❌ Montant invalide. Veuillez entrer un nombre valide.';
+      });
+      return;
+    }
+
+    // ✅ Étape 1 : Vérifie si le NFC est disponible
+    final availability = await FlutterNfcKit.nfcAvailability;
+    if (availability != NFCAvailability.available) {
+      setState(() {
+        result = '❌ NFC non disponible : $availability';
       });
       return;
     }
@@ -153,16 +164,17 @@ class _HomeScreenState extends State<HomeScreen> {
       resetFields();
       setState(() => isLoading = true);
 
-      // 📡 Étape 1 : Attente d'une carte NFC
-
+      // 📡 Étape 2 : Attente d'une carte NFC
       final tag = await FlutterNfcKit.poll(
-        timeout: const Duration(seconds: 20), // Timeout de 20 secondes
+        timeout: const Duration(seconds: 20),
       );
       if (tag == null) {
         setState(() => result = '❌ Carte non détectée');
         return;
       }
       print('✅ Carte détectée : ${tag.type}');
+
+      // ... le reste de ta logique EMV ici
 
       // 📤 Étape 2 : Envoi SELECT PPSE
       final apduHex =
@@ -577,6 +589,12 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _loadTransactions();
+
+    if (widget.initialAmount != null && widget.initialAmount!.isNotEmpty) {
+      amount = widget.initialAmount!;
+      print('🚀 _startEMVSession() déclenché automatiquement avec $amount');
+      WidgetsBinding.instance.addPostFrameCallback((_) => _startEMVSession());
+    }
   }
 
   void _loadTransactions() async {
