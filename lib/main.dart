@@ -34,11 +34,15 @@ void main() {
 }
 
 class HomeScreen extends StatefulWidget {
-  final String? initialAmount;
-
-  const HomeScreen({super.key, this.initialAmount});
+  //un écran (une page) qui peut évoluer dans le temps (c’est un StatefulWidget, donc il a un State associé).
+  final String?
+  initialAmount; //un champ (attribut) de ta classe HomeScreen, appelé initialAmount.C’est une valeur facultative (String?) qui représente le montant à encaisser
+  const HomeScreen({
+    super.key,
+    this.initialAmount,
+  }); //le constructeur de la page :super.key est un paramètre utile pour Flutter (optimisations internes).this.initialAmount permet de passer directement une valeur à initialAmount
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<HomeScreen> createState() => _HomeScreenState(); // Tu dis que le "state" (l'état) de cette page sera géré par une autre classe : _HomeScreenState
 }
 
 class _HomeScreenState extends State<HomeScreen> {
@@ -56,6 +60,7 @@ class _HomeScreenState extends State<HomeScreen> {
   TextEditingController amountController =
       TextEditingController(); // Contrôleur pour le montant
   final int floorLimit = 100000; // Montant en centimes : ici 1000.00 DA
+
   final RSAPublicKey capkTest = RSAPublicKey(
     BigInt.parse(
       //exemple de CAPK Visa 1024 bits (publique) utilisée pour vérifier la signature SDA.
@@ -67,6 +72,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final encrypt.Key aesKey = encrypt.Key.fromSecureRandom(
     32,
   ); // Clé AES sécurisée
+
   final encrypt.IV aesIv = encrypt.IV.fromSecureRandom(16); // IV sécurisé
   List<TransactionLog> transactionLogs =
       []; // Historique local des transactions
@@ -165,15 +171,17 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => isLoading = true);
 
       // 📡 Étape 2 : Attente d'une carte NFC
-      final tag = await FlutterNfcKit.poll(
-        timeout: const Duration(seconds: 20),
-      );
-      if (tag == null) {
-        setState(() => result = '❌ Carte non détectée');
+      try {
+        final tag = await FlutterNfcKit.poll(
+          timeout: const Duration(seconds: 20),
+        );
+        print('✅ Carte détectée : ${tag.type}');
+        setState(() => result = '✅ Carte détectée : ${tag.type}');
+      } catch (e) {
+        print('❌ Erreur NFC : $e');
+        setState(() => result = '❌ Aucune carte détectée (timeout)');
         return;
       }
-      print('✅ Carte détectée : ${tag.type}');
-
       // ... le reste de ta logique EMV ici
 
       // 📤 Étape 2 : Envoi SELECT PPSE
