@@ -1,98 +1,67 @@
 import 'package:flutter/material.dart';
-import 'package:testpos/main.dart'; // pour accéder à HomeScreen
+import 'nfc_waiting_page.dart';
 
 class AmountPage extends StatefulWidget {
-  const AmountPage({Key? key}) : super(key: key);
+  const AmountPage({super.key});
 
   @override
   State<AmountPage> createState() => _AmountPageState();
 }
 
 class _AmountPageState extends State<AmountPage> {
-  String amount = "0.00";
-  final TextEditingController amountController = TextEditingController();
+  final TextEditingController _amountController = TextEditingController();
 
-  void _onClear() {
-    setState(() {
-      amount = "0.00";
-      amountController.clear();
-    });
+  void _startTransaction() {
+    final amount = _amountController.text.trim();
+    if (amount.isEmpty || !_isValidAmount(amount)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Veuillez entrer un montant valide.')),
+      );
+      return;
+    }
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => NfcWaitingPage(initialAmount: amount)),
+      (route) => false,
+    );
   }
 
-  void _onConfirm() {
-    Navigator.pushNamed(
-      context,
-      '/nfcWaiting',
-      arguments: {
-        'amount': amount,
-        'startSession': () {
-          print('📲 Lancement de HomeScreen avec montant = $amount');
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => HomeScreen(initialAmount: amount),
-            ),
-          );
-        },
-      },
-    );
+  bool _isValidAmount(String value) {
+    final regex = RegExp(r'^\d+(\.\d{1,2})?$');
+
+    return regex.hasMatch(value);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Montant"), centerTitle: true),
+      appBar: AppBar(title: const Text('Saisie du Montant')),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text(
-              '\u{1F4B0} Entrez le montant',
-              style: TextStyle(fontSize: 20),
+              'Montant à encaisser',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 12),
             TextField(
-              controller: amountController,
+              controller: _amountController,
               keyboardType: TextInputType.numberWithOptions(decimal: true),
               decoration: InputDecoration(
                 hintText: 'Ex : 1500.00',
-                prefixIcon: const Icon(Icons.payments),
-                filled: true,
-                fillColor: Colors.grey[200],
+                prefixIcon: const Icon(Icons.attach_money),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
-              onChanged: (value) => setState(() => amount = value),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              icon: const Icon(Icons.nfc),
-              onPressed:
-                  amount.isEmpty ||
-                          double.tryParse(amount) == null ||
-                          double.parse(amount) <= 0
-                      ? null
-                      : _onConfirm,
-              label: const Text('Lire carte EMV'),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton(
-              onPressed: _onClear,
-              child: const Text('Réinitialiser'),
             ),
             const SizedBox(height: 20),
-            TextButton.icon(
-              onPressed: () {
-                Navigator.pushNamed(context, '/transactionHistory');
-              },
-              icon: const Icon(Icons.history),
-              label: const Text('Voir l’historique'),
-              style: TextButton.styleFrom(
-                foregroundColor: Colors.teal,
-                textStyle: const TextStyle(fontSize: 16),
-              ),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('Démarrer la session NFC'),
+              onPressed: _startTransaction,
             ),
           ],
         ),

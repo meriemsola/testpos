@@ -4,6 +4,7 @@ import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
 import 'package:pointycastle/asymmetric/api.dart';
 import 'package:testpos/models/transaction_log_model.dart';
 import 'package:testpos/presentation/main_navigation.dart';
+import 'package:testpos/presentation/pin_entry_page.dart';
 import 'package:testpos/presentation/transaction_detail_page.dart';
 import 'package:testpos/presentation/transaction_history_page.dart';
 import 'package:testpos/presentation/transaction_summary_page.dart';
@@ -11,7 +12,6 @@ import 'package:testpos/transaction_storage.dart';
 import 'core/tlv_parser.dart';
 import 'core/hex.dart';
 import 'data/nfc/apdu_commands.dart';
-import 'presentation/receipt_screen.dart';
 import 'package:encrypt/encrypt.dart' as encrypt;
 import 'presentation/nfc_waiting_page.dart';
 
@@ -23,7 +23,7 @@ void main() {
       home:
           const MainNavigation(), // C'est ici qu'on charge le menu principal avec onglets
       routes: {
-        '/nfcWaiting': (context) => const NfcWaitingPage(),
+        '/nfcWaiting': (context) => const NfcWaitingPage(initialAmount: ''),
         '/transactionSummary': (context) => const TransactionSummaryPage(),
         '/transactionDetail': (context) => const TransactionDetailPage(),
         '/transactionHistory':
@@ -78,39 +78,15 @@ class _HomeScreenState extends State<HomeScreen> {
       []; // Historique local des transactions
 
   Future<void> _demanderPin() async {
-    String? pin = await showDialog<String>(
-      context: context,
-      builder: (context) {
-        String enteredPin = '';
-        return AlertDialog(
-          title: const Text('Entrer le PIN'),
-          content: TextField(
-            obscureText: true,
-            keyboardType: TextInputType.number,
-            maxLength: 6,
-            onChanged: (value) => enteredPin = value,
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, null),
-              child: const Text('Annuler'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, enteredPin),
-              child: const Text('Valider'),
-            ),
-          ],
-        );
-      },
+    final pin = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const PinEntryPage()),
     );
 
-    if (!mounted) return; // ⛑ sécurité : le widget est-il toujours monté ?
+    if (!mounted) return;
 
     if (pin == null || pin.length < 4) {
-      // Utilisation sûre de setState
-      setState(() {
-        result = '❌ PIN incorrect ou annulé';
-      });
+      setState(() => result = '❌ PIN incorrect ou annulé');
       throw Exception('CVM échoué');
     }
 
@@ -148,7 +124,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // 📘 Étapes 1 à 13 : Processus EMV complet
-  void _startEMVSession() async {
+  void _startEMVSession({required bool skipReset}) async {
     // ✅ Étape 0 : Vérifie si le montant est valide
     if (!_isValidAmount(amount)) {
       setState(() {
@@ -182,8 +158,7 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() => result = '❌ Aucune carte détectée (timeout)');
         return;
       }
-      // ... le reste de ta logique EMV ici
-
+      //fghjk
       // 📤 Étape 2 : Envoi SELECT PPSE
       final apduHex =
           ApduCommands.selectPPSE
@@ -233,18 +208,19 @@ class _HomeScreenState extends State<HomeScreen> {
           break;
         }
       }
+
       List<int> gpoCommand;
       if (pdolHex != null && pdolHex.isNotEmpty) {
         final pdolBytes = _hexToBytes(pdolHex);
         List<int> pdolData = [];
         int idx = 0;
+
         while (idx < pdolBytes.length) {
           final tag =
               pdolBytes[idx].toRadixString(16).padLeft(2, '0') +
               pdolBytes[idx + 1].toRadixString(16).padLeft(2, '0');
           final length = pdolBytes[idx + 2];
           idx += 3;
-
           if (tag == '9F02') {
             // Montant de la transaction
             int transactionAmount = (double.parse(amount) * 100).toInt();
@@ -270,6 +246,7 @@ class _HomeScreenState extends State<HomeScreen> {
       } else {
         gpoCommand = [0x80, 0xA8, 0x00, 0x00, 0x02, 0x83, 0x00, 0x00];
       }
+
       final gpoHexStr =
           gpoCommand.map((e) => e.toRadixString(16).padLeft(2, '0')).join();
       final gpoResponseHex = await FlutterNfcKit.transceive(gpoHexStr);
@@ -307,6 +284,7 @@ class _HomeScreenState extends State<HomeScreen> {
               (tlv) => tlv.tag == '93',
               orElse: () => TLV('00', 0, []),
             );
+
             if (sdaTlv.tag == '93') {
               final signature = Uint8List.fromList(sdaTlv.value);
               final staticData = <int>[];
@@ -335,6 +313,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 }
               }
             }
+
             // 📘 Étape 7 : Traitement de la CVM List (tag 8E)
             final cvmTlv = gpoTlvs.firstWhere(
               (tlv) => tlv.tag == '8E',
@@ -415,6 +394,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 result =
                     '✅ Autorisation acceptée pour $amount (simulation en ligne)',
           );
+
           transactionLogs.add(
             TransactionLog(
               pan: pan,
@@ -436,25 +416,18 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       // 📘 Étape 12 : Affichage du reçu avec toutes les informations nécessaires
-      Navigator.push(
+      Navigator.pushReplacementNamed(
         context,
-        MaterialPageRoute(
-          builder:
-              (context) => ReceiptScreen(
-                pan: pan,
-                expiration: expiration,
-                name: name,
-                atc: atc,
-                status: result,
-                amount: amount, // Ajouter le montant ici
-                transactionReference:
-                    transactionReference, // Numéro de référence de la transaction
-                authorizationCode:
-                    authorizationCode, // Code d'autorisation simulé
-                dateTime:
-                    DateTime.now()
-                        .toString(), // Date et heure de la transaction
-              ),
+        '/transactionDetail',
+        arguments: TransactionLog(
+          pan: pan,
+          expiration: expiration,
+          atc: atc,
+          result: result,
+          timestamp: DateTime.now(),
+          amount: amount,
+          dateTime: DateTime.now().toString(),
+          status: result,
         ),
       );
     } catch (e) {
@@ -600,8 +573,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (widget.initialAmount != null && widget.initialAmount!.isNotEmpty) {
       amount = widget.initialAmount!;
-      print('🚀 _startEMVSession() déclenché automatiquement avec $amount');
-      WidgetsBinding.instance.addPostFrameCallback((_) => _startEMVSession());
+      amountController.text = widget.initialAmount!;
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        FocusScope.of(context).unfocus();
+        _startEMVSession(skipReset: true);
+      });
     }
   }
 
@@ -639,48 +616,64 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '💰 Montant à encaisser',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: amountController,
-              keyboardType: TextInputType.numberWithOptions(decimal: true),
-              decoration: InputDecoration(
-                hintText: 'Ex : 1500.00',
-                prefixIcon: const Icon(Icons.payments),
-                filled: true,
-                fillColor: Colors.grey[200],
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
+            widget.initialAmount == null || widget.initialAmount!.isEmpty
+                ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '💰 Montant à encaisser',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: amountController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: 'Ex : 1500.00',
+                        prefixIcon: const Icon(Icons.payments),
+                        filled: true,
+                        fillColor: Colors.grey[200],
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      onChanged: (value) => setState(() => amount = value),
+                    ),
+                  ],
+                )
+                : Text(
+                  '💰 Montant : \$${amount}',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
-              ),
-              onChanged: (value) => setState(() => amount = value),
-            ),
+
             const SizedBox(height: 24),
             Row(
               children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    icon: const Icon(Icons.nfc),
-                    onPressed:
-                        isLoading || amount.isEmpty || !_isValidAmount(amount)
-                            ? null
-                            : _startEMVSession,
-                    label: const Text('Lire carte EMV'),
-                  ),
-                ),
                 const SizedBox(width: 12),
-                OutlinedButton(
-                  onPressed: isLoading ? null : resetFields,
+                OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.pushAndRemoveUntil(
+                      context,
+                      MaterialPageRoute(builder: (_) => const MainNavigation()),
+                      (route) => false,
+                    );
+                  },
+                  icon: const Icon(Icons.home),
+                  label: const Text('Accueil'),
                   style: OutlinedButton.styleFrom(
                     side: const BorderSide(color: Colors.teal),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
-                  child: const Text('Réinitialiser'),
                 ),
               ],
             ),

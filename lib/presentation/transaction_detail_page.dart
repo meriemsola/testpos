@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:testpos/models/transaction_log_model.dart';
+import 'package:testpos/presentation/receipt_screen.dart';
 
 class TransactionDetailPage extends StatelessWidget {
   const TransactionDetailPage({super.key});
@@ -52,6 +53,31 @@ class TransactionDetailPage extends StatelessWidget {
             Text(
               '🧾 Statut : ${tx.status}',
               style: const TextStyle(fontSize: 18),
+            ),
+            const SizedBox(height: 30),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder:
+                        (_) => ReceiptScreen(
+                          pan: tx.pan,
+                          expiration: tx.expiration,
+                          name: 'Client',
+                          atc: tx.atc,
+                          status: tx.status,
+                          amount: tx.amount,
+                          transactionReference:
+                              'TRN${tx.timestamp.millisecondsSinceEpoch}',
+                          authorizationCode: 'AUTH1234',
+                          dateTime: tx.dateTime,
+                        ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.receipt_long),
+              label: const Text('Imprimer le reçu'),
             ),
           ],
         ),

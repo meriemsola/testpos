@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:printing/printing.dart';
+import 'package:testpos/presentation/main_navigation.dart';
 import 'package:testpos/presentation/receipt_pdf_generator.dart';
 
 class ReceiptScreen extends StatelessWidget {
@@ -99,8 +100,16 @@ class ReceiptScreen extends StatelessWidget {
                 const SizedBox(height: 12),
                 ElevatedButton.icon(
                   onPressed:
-                      () =>
-                          Navigator.popUntil(context, ModalRoute.withName('/')),
+                      () => () {
+                        Navigator.pushAndRemoveUntil(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const MainNavigation(),
+                          ),
+                          (route) => false,
+                        );
+                      },
+
                   icon: const Icon(Icons.home),
                   label: const Text('Retour à l’accueil'),
                 ),

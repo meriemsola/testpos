@@ -1,119 +1,59 @@
 import 'package:flutter/material.dart';
+import 'package:testpos/main.dart';
 
-class NfcWaitingPage extends StatefulWidget {
-  const NfcWaitingPage({super.key});
+class NfcWaitingPage extends StatelessWidget {
+  final String initialAmount;
 
-  @override
-  State<NfcWaitingPage> createState() => _NfcWaitingPageState();
-}
-
-class _NfcWaitingPageState extends State<NfcWaitingPage> {
-  late String amount;
-  late String result;
-  late String pan;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final args = ModalRoute.of(context)?.settings.arguments;
-    if (args is Map<String, dynamic>) {
-      amount = args['amount'] ?? '0.00';
-      result = args['result'] ?? '';
-      pan = args['pan'] ?? '';
-
-      print('📦 Arguments reçus dans NFC Waiting : $args');
-
-      Future.microtask(() {
-        final Function()? startSession = args['startSession'];
-        if (startSession != null) {
-          print('📡 Lancement de startSession() depuis NfcWaitingPage');
-          startSession();
-        } else {
-          print('⚠️ startSession est null');
-        }
-      });
-    } else {
-      amount = '0.00';
-      result = '';
-      pan = '';
-    }
-
-    if (result.contains('acceptée') || result.contains('approuvée')) {
-      Future.delayed(const Duration(seconds: 2), () {
-        Navigator.pushNamed(
-          context,
-          '/transactionSummary',
-          arguments: {
-            'pan': pan,
-            'amount': amount,
-            'date': DateTime.now().toString(),
-            'status': result,
-          },
-        );
-      });
-    }
-  }
+  const NfcWaitingPage({super.key, required this.initialAmount});
 
   @override
   Widget build(BuildContext context) {
-    String statusText;
-    Color statusColor;
-
-    if (result.contains('acceptée') || result.contains('approuvée')) {
-      statusText = '✅ Success';
-      statusColor = Colors.green;
-    } else if (result.contains('refusée') ||
-        result.contains('invalide') ||
-        result.contains('Erreur') ||
-        result.contains('❌') ||
-        result.contains('⚠️')) {
-      statusText = '❌ Échec';
-      statusColor = Colors.red;
-    } else {
-      statusText = '⏳ Waiting...';
-      statusColor = Colors.orange;
-    }
+    Future.delayed(const Duration(seconds: 2), () {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => HomeScreen(initialAmount: initialAmount),
+        ),
+      );
+    });
 
     return Scaffold(
       backgroundColor: Colors.white,
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.nfc, size: 80, color: Colors.teal),
-                const SizedBox(height: 20),
-                const Text(
-                  'Kindly put the card on the back of your phone, and wait for a few seconds.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 18),
-                ),
-                const SizedBox(height: 30),
-                Text(
-                  'Amount: ${amount}',
-                  style: const TextStyle(
-                    fontSize: 26,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black87,
-                  ),
-                ),
-                const SizedBox(height: 40),
-                const CircularProgressIndicator(),
-                const SizedBox(height: 12),
-                Text(
-                  statusText,
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: statusColor,
-                  ),
-                ),
-              ],
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Spacer(),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 30),
+            child: Image.asset(
+              'assets/images/nfc_scan.png', // 📸 ton image depuis Google
+              height: 250,
+              fit: BoxFit.contain,
             ),
           ),
-        ),
+          const SizedBox(height: 30),
+          Text(
+            'Approchez votre carte',
+            style: TextStyle(fontSize: 20, color: Colors.black87),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              color: Colors.black12,
+            ),
+            child: Text(
+              '$initialAmount DA',
+              style: const TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+                color: Colors.teal,
+              ),
+            ),
+          ),
+          const Spacer(),
+        ],
       ),
     );
   }
