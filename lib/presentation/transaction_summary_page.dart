@@ -59,7 +59,7 @@ class TransactionSummaryPage extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              '💰 Montant : \$${amount}',
+              '💰 Montant : \$$amount',
               style: const TextStyle(fontSize: 18),
             ),
             const SizedBox(height: 12),

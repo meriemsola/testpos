@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 import 'dart:io';
-import 'package:path_provider/path_provider.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:pdf/pdf.dart';
 
@@ -41,7 +40,7 @@ Future<Uint8List> generateReceiptPdf({
                 _buildLine('Nom', name),
                 _buildLine('Carte', pan),
                 _buildLine('Expiration', expiration),
-                _buildLine('Montant', '\$${amount}'),
+                _buildLine('Montant', '\$$amount'),
                 _buildLine('Date', dateTime),
                 _buildLine('Référence', transactionReference),
                 _buildLine('Code Autorisation', authorizationCode),

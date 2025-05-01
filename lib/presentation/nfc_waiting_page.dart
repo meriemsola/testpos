@@ -26,7 +26,7 @@ class NfcWaitingPage extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 30),
             child: Image.asset(
-              'assets/images/nfc_scan.png', // 📸 ton image depuis Google
+              'assets/images/nfc_scan.png',
               height: 250,
               fit: BoxFit.contain,
             ),

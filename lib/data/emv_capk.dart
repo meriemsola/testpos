@@ -1,4 +1,3 @@
-import 'package:pointycastle/api.dart';
 import 'package:pointycastle/asymmetric/api.dart';
 
 /// CAPK Visa test publique — Extrait d’un exemple de test EMVCo

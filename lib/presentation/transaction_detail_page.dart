@@ -64,7 +64,7 @@ class TransactionDetailPage extends StatelessWidget {
                         (_) => ReceiptScreen(
                           pan: tx.pan,
                           expiration: tx.expiration,
-                          name: 'Client',
+                          name: '', // ✅ Ici on met une string vide
                           atc: tx.atc,
                           status: tx.status,
                           amount: tx.amount,
