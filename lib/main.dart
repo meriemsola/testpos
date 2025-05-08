@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
+import 'package:pointycastle/api.dart';
 import 'package:pointycastle/asymmetric/api.dart';
+import 'package:pointycastle/asymmetric/api.dart' as pc;
+import 'package:pointycastle/asymmetric/rsa.dart';
 import 'package:testpos/models/transaction_log_model.dart';
 import 'package:testpos/presentation/main_navigation.dart';
 import 'package:testpos/presentation/pin_entry_page.dart';
@@ -15,6 +18,9 @@ import 'core/hex.dart';
 import 'data/nfc/apdu_commands.dart';
 import 'package:encrypt/encrypt.dart' as encrypt;
 import 'presentation/nfc_waiting_page.dart';
+import 'package:pointycastle/asymmetric/rsa.dart'; // ✅ Pour RSAEngine et RSAPublicKey
+import 'package:pointycastle/api.dart' as pc; // ✅ Pour PublicKeyParameter
+import 'package:convert/convert.dart';
 
 void main() {
   runApp(
@@ -32,6 +38,20 @@ void main() {
       },
     ),
   );
+}
+
+class GenerateACResult {
+  final String ac;
+  final String atc;
+  final String cid;
+  final List<int> rawResponse;
+
+  GenerateACResult({
+    required this.ac,
+    required this.atc,
+    required this.cid,
+    required this.rawResponse,
+  });
 }
 
 class HomeScreen extends StatefulWidget {
@@ -62,6 +82,47 @@ class _HomeScreenState extends State<HomeScreen> {
       TextEditingController(); // Contrôleur pour le montant
   final int floorLimit = 100000; // Montant en centimes : ici 1000.00 DA
   String cardCountryCode = '000'; // Valeur par défaut si 9F1A n'est pas trouvé
+  late Uint8List generatedArpc;
+  late String authorizationResponseCode;
+
+  // ➡️ Fonction pour décrypter avec la clé publique CA
+  Uint8List decryptWithCAPublicKey(Uint8List signature) {
+    final modulus = BigInt.parse(
+      'C2FA4312E3B5174838241FAC87D9A46B984BC45A88A71979823852D3F6C65708C78BC742C0595108C6679EF52BEC7AE4D3D13F776876430982AAA38125629CF9CE22029C65CA4F4C5C9F34D8A2CF704846937A2C7695D58324BDF3092521511FE29FD8872FC7A1E2C76A82B6DD691DA4468B1331793800635F7D622723987CEA6AD6DA0AB489D0637A3663DF0E5364662119CE2CF76C96894D623E0BF36CEED3330C84EC7353DA1AD064C8095F162841',
+      radix: 16,
+    );
+    final exponent = BigInt.parse('03', radix: 16);
+
+    final publicKey = RSAPublicKey(modulus, exponent);
+
+    final decryptor =
+        RSAEngine()..init(false, PublicKeyParameter<RSAPublicKey>(publicKey));
+
+    return decryptor.process(signature);
+  }
+
+  // ➡️ Fonction pour extraire le 9F4B
+  Uint8List extract9F4B(Uint8List response) {
+    int index = 0;
+    while (index < response.length - 2) {
+      if (response[index] == 0x9F && response[index + 1] == 0x4B) {
+        int length = response[index + 2];
+        return response.sublist(index + 3, index + 3 + length);
+      }
+      index++;
+    }
+    throw Exception('9F4B not found in the response');
+  }
+
+  List<int> generateUnpredictableNumber() {
+    final random = DateTime.now().millisecondsSinceEpoch;
+    return [
+      (random >> 24) & 0xFF,
+      (random >> 16) & 0xFF,
+      (random >> 8) & 0xFF,
+      random & 0xFF,
+    ];
+  }
 
   // 🗂️ Table CAPK (clé publique par RID et index)
   final Map<String, List<Map<String, String>>> capkTable = {
@@ -271,9 +332,37 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // ⚠️ TEMPORAIRE (simulation actuelle) : a Supprime
     await Future.delayed(const Duration(seconds: 2));
+
+    // ➡️ Génère l'ARPC fictif à partir de l'ARQC
+    final arqcBytes = _hexToBytes(arqc);
+    generatedArpc = Uint8List.fromList(arqcBytes.take(8).toList());
+
+    // ➡️ Stocke un code d'autorisation (00 = accepté)
+    authorizationResponseCode = '00'; // tu peux mettre '05' si refusé
+
     print('✅ ARQC envoyé avec PIN online : $pinOnline');
-    return true; // ← simulation tjrs accepter
+    return true;
   }
+
+  void decisionTerminale(String cidHex) {
+    final cid = int.parse(cidHex, radix: 16);
+
+    if (cid == 0x40) {
+      print('✅ Transaction acceptée offline (TC)');
+      // Tu peux afficher "Paiement accepté" directement
+    } else if (cid == 0x80) {
+      print('📡 Transaction à envoyer pour autorisation online (ARQC)');
+      // Normalement ici, tu dois appeler un serveur bancaire
+      // (tu peux simuler une autorisation OK dans ton cas pour continuer)
+    } else if (cid == 0x00) {
+      print('❌ Transaction refusée (AAC)');
+      // Afficher échec paiement
+    } else {
+      print('⚠️ CID inconnu : $cid');
+      // Comportement par défaut : refuser
+    }
+  }
+
   /*C’est la fonction qui génère le Application Cryptogram (AC), étape essentielle dans le process EMV.
 
     L’AC peut être :
@@ -286,53 +375,96 @@ class _HomeScreenState extends State<HomeScreen> {
 
     */
 
-  Future<void> _generateAc(
+  Future<Object?> generateAcFixed(
     String taaDecision,
-    List<TLV> aidResponseTlvs,
-    String fullPan,
+    List<TLV> recordTlvs,
+    String amount,
   ) async {
     try {
-      // 📌 Lire le CDOL1 (Tag 8C)
-      final cdol1Tlv =
-          TLVParser.findTlvRecursive(aidResponseTlvs, 0x8C) ??
-          TLV(0x00, Uint8List(0));
-
-      if (cdol1Tlv.tag != 0x8C) {
-        print('❌ Pas de CDOL1 trouvé → Impossible de générer AC');
-        return;
+      TLV? cdol1Tlv;
+      for (final record in recordTlvs) {
+        cdol1Tlv = TLVParser.findTlvRecursive([record], 0x8C);
+        if (cdol1Tlv != null) {
+          print(
+            '✅ CDOL1 trouvé : ${cdol1Tlv.value.map((e) => e.toRadixString(16).padLeft(2, '0')).join()}',
+          );
+          break;
+        }
       }
 
+      if (cdol1Tlv == null) {
+        print('❌ Aucun CDOL1 trouvé dans les records.');
+        return [];
+      }
+      final r = recordTlvs;
       final cdol1 = cdol1Tlv.value;
       List<int> cdolData = [];
       int idx = 0;
 
       while (idx < cdol1.length) {
-        final tag =
-            cdol1[idx].toRadixString(16).padLeft(2, '0') +
-            cdol1[idx + 1].toRadixString(16).padLeft(2, '0');
-        final length = cdol1[idx + 2];
-        idx += 3;
-
-        if (tag == '9F02') {
-          int transactionAmount =
-              ((double.tryParse(amount) ?? 0) * 100).toInt();
-          final amountHex = transactionAmount
-              .toRadixString(16)
-              .padLeft(length * 2, '0');
-          cdolData.addAll(_hexToBytes(amountHex));
-        } else if (tag == '9F1A') {
-          const terminalCountryCode = '056';
-          cdolData.addAll(
-            _hexToBytes(terminalCountryCode.padLeft(length * 2, '0')),
-          );
-        } else if (tag == '9F37') {
-          final random = List<int>.generate(
-            length,
-            (i) => (DateTime.now().millisecondsSinceEpoch >> (i * 8)) & 0xFF,
-          );
-          cdolData.addAll(random);
+        int firstByte = cdol1[idx];
+        String tag = '';
+        if ((firstByte & 0x1F) == 0x1F) {
+          tag =
+              cdol1[idx].toRadixString(16).padLeft(2, '0') +
+              cdol1[idx + 1].toRadixString(16).padLeft(2, '0');
+          idx += 2;
         } else {
-          cdolData.addAll(List.filled(length, 0x00));
+          tag = cdol1[idx].toRadixString(16).padLeft(2, '0');
+          idx += 1;
+        }
+        tag = tag.toUpperCase();
+
+        final length = cdol1[idx];
+        idx += 1;
+
+        print('🔎 Tag trouvé : $tag longueur : $length');
+
+        switch (tag) {
+          case '9F02': // Amount Authorized
+            int transactionAmount =
+                ((double.tryParse(amount) ?? 0) * 100).toInt();
+            cdolData.addAll(
+              _hexToBytes(
+                transactionAmount.toRadixString(16).padLeft(length * 2, '0'),
+              ),
+            );
+            break;
+          case '9F03': // Amount Other
+            cdolData.addAll(List.filled(length, 0x00));
+            break;
+          case '9F1A': // Terminal Country Code
+            cdolData.addAll(
+              _hexToBytes('0564'.padLeft(length * 2, '0')),
+            ); // Algérie
+            break;
+          case '95': // Terminal Verification Results
+            cdolData.addAll(_hexToBytes('8000048000'.padLeft(length * 2, '0')));
+            break;
+          case '5F2A': // Transaction Currency Code
+            cdolData.addAll(
+              _hexToBytes('0121'.padLeft(length * 2, '0')),
+            ); // Dinar
+            break;
+          case '9A': // Transaction Date
+            cdolData.addAll(_hexToBytes('250507')); // YYMMDD
+            break;
+          case '9C': // Transaction Type
+            cdolData.add(0x00); // Purchase
+            break;
+          case '9F37': // Unpredictable Number
+            cdolData.addAll(_hexToBytes('B9467AAA')); // Number fixe
+            break;
+          case '9F35': // Terminal Type
+            cdolData.add(0x22);
+            break;
+          case '9F34': // CVM Results
+            cdolData.addAll(_hexToBytes('420300'.padLeft(length * 2, '0')));
+            break;
+          default:
+            print('ℹ️ Tag inconnu $tag → remplissage avec 00');
+            cdolData.addAll(List.filled(length, 0x00));
+            break;
         }
       }
 
@@ -352,108 +484,106 @@ class _HomeScreenState extends State<HomeScreen> {
           generateAcCommand
               .map((e) => e.toRadixString(16).padLeft(2, '0'))
               .join();
-      print('📤 GENERATE AC : $generateAcHex');
+      print('📤 Envoi Generate AC : $generateAcHex');
 
       final responseHex = await FlutterNfcKit.transceive(generateAcHex);
-      print('📥 Réponse GENERATE AC : $responseHex');
-
+      print('📥 Réponse Generate AC : $responseHex');
       final responseBytesList = _hexToBytes(responseHex);
       final responseBytes = Uint8List.fromList(responseBytesList);
-      final responseTlvs = TLVParser.parse(responseBytes);
+      final generateAcTlvs = TLVParser.parse(responseBytes);
 
-      // 🔎 Extraction CID
-      final cidTlv =
-          TLVParser.findTlvRecursive(responseTlvs, 0x9F27) ??
-          TLV(0x00, Uint8List(0));
+      // ✨ Correction ici ✨
+      Map<String, String> extractedAuthData = {};
 
-      final cid =
-          cidTlv.value.isNotEmpty
-              ? cidTlv.value[0].toRadixString(16).padLeft(2, '0')
-              : '00';
-      print('🔎 CID : $cid');
-
-      // 🔎 Extraction ATC
-      final atcTlv =
-          TLVParser.findTlvRecursive(responseTlvs, 0x9F36) ??
-          TLV(0x00, Uint8List(0));
-
-      if (atcTlv.tag == 0x9F36) {
-        final atc =
-            atcTlv.value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-        print('🔢 ATC : $atc');
-      }
-
-      // 🔥 Interprétation du CID
-      if (cid == '40') {
-        print('✅ Transaction approuvée offline (TC)');
-      } else if (cid == '80') {
-        print('❌ Transaction refusée par la carte (AAC)');
-      } else if (cid == '00') {
-        print('🔄 Autorisation online demandée (ARQC)');
-
-        // 📥 Extraction de l’ARQC
-        final acTlv =
-            TLVParser.findTlvRecursive(responseTlvs, 0x9F26) ??
-            TLV(0x00, Uint8List(0));
-
-        final arqc =
-            acTlv.value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-
-        final atcValue =
-            atcTlv.value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-
-        final authorized = await sendArqcToBackend(
-          arqc: arqc,
-          pan: fullPan,
-          atc: atcValue,
-          amount: int.parse(amount),
-          pinOnline: authorizationCode,
-        );
-
-        if (authorized) {
-          print('💎 Banque OK → continuer avec le 2nd GENERATE AC');
-          await secondGenerateAc(
-            authorized: true,
-            aidResponseTlvs: aidResponseTlvs,
-          );
-        } else {
-          print('🚫 Banque refuse → stoppe la transaction');
-          await secondGenerateAc(
-            authorized: false,
-            aidResponseTlvs: aidResponseTlvs,
-          );
-        }
-      } else {
-        print('❓ CID inconnu : $cid');
-      }
-
-      // 📜 Traitement des Issuer Scripts (71, 72)
-      for (var scriptTag in [0x71, 0x72]) {
-        final scriptTlv =
-            TLVParser.findTlvRecursive(responseTlvs, scriptTag) ??
-            TLV(0x00, Uint8List(0));
-
-        if (scriptTlv.tag == scriptTag) {
-          final scriptCommand =
-              scriptTlv.value
-                  .map((b) => b.toRadixString(16).padLeft(2, '0'))
-                  .join();
-          print(
-            '▶️ Envoi Issuer Script ${scriptTag.toRadixString(16).toUpperCase()} : $scriptCommand',
-          );
-
-          try {
-            final scriptResponse = await FlutterNfcKit.transceive(
-              scriptCommand,
-            );
-            print('📥 Réponse du Issuer Script : $scriptResponse');
-          } catch (e) {
-            print('❌ Erreur lors de l’exécution du Issuer Script : $e');
+      TLV? template77 = TLVParser.findTlvRecursive(generateAcTlvs, 0x77);
+      if (template77 != null) {
+        final subTlvs = TLVParser.parse(template77.value);
+        for (final tlv in subTlvs) {
+          if (tlv.tag == 0x9F26) {
+            // AC
+            extractedAuthData['ac'] =
+                tlv.value
+                    .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                    .join();
+            print('✅ AC trouvé : ${extractedAuthData['ac']}');
+          }
+          if (tlv.tag == 0x9F36) {
+            // ATC
+            extractedAuthData['atc'] =
+                tlv.value
+                    .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                    .join();
+            print('✅ ATC trouvé : ${extractedAuthData['atc']}');
+          }
+          if (tlv.tag == 0x9F27) {
+            // CID
+            extractedAuthData['cid'] =
+                tlv.value
+                    .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                    .join();
+            print('✅ CID trouvé : ${extractedAuthData['cid']}');
           }
         }
+      } else {
+        print('❌ Pas de template 77 trouvé dans la réponse Generate AC');
+      }
+
+      bool hasAc =
+          extractedAuthData.containsKey('ac') &&
+          extractedAuthData['ac']!.isNotEmpty;
+      bool hasAtc =
+          extractedAuthData.containsKey('atc') &&
+          extractedAuthData['atc']!.isNotEmpty;
+      bool hasCid =
+          extractedAuthData.containsKey('cid') &&
+          extractedAuthData['cid']!.isNotEmpty;
+
+      if (hasAc && hasAtc && hasCid) {
+        print('✅ Tous les éléments nécessaires ont été extraits.');
+      } else {
+        print('❌ Données manquantes dans Generate AC.');
+      }
+      if (hasCid) {
+        final cidHex = extractedAuthData['cid']!;
+        if (cidHex == '40') {
+          // ✅ Transaction acceptée offline
+          await secondGenerateAc(authorized: true, recordTlvs: r);
+        } else if (cidHex == '00') {
+          // 📡 Transaction demande une autorisation online
+          final pinOnline =
+              await _demanderPin(); // (demander un PIN online éventuellement)
+
+          final isAuthorized = await sendArqcToBackend(
+            arqc: extractedAuthData['ac']!,
+            pan: pan,
+            atc: extractedAuthData['atc']!,
+            amount: ((double.tryParse(amount) ?? 0) * 100).toInt(),
+            pinOnline: pinOnline,
+          );
+
+          await secondGenerateAc(authorized: isAuthorized, recordTlvs: r);
+        } else if (cidHex == '80') {
+          // ❌ Transaction refusée offline
+          await secondGenerateAc(authorized: false, recordTlvs: r);
+        } else {
+          // CID inconnu, refuser
+          await secondGenerateAc(authorized: false, recordTlvs: r);
+        }
+      }
+
+      if (hasAc && hasAtc && hasCid) {
+        return GenerateACResult(
+          ac: extractedAuthData['ac']!,
+          atc: extractedAuthData['atc']!,
+          cid: extractedAuthData['cid']!,
+          rawResponse: _hexToBytes(responseHex),
+        );
+      } else {
+        return null; // Tu peux aussi lancer une exception si tu préfères
       }
     } catch (e) {
-      print('❌ Erreur lors de GENERATE AC : $e');
+      print('❌ Erreur Generate AC : $e');
+      return [];
     }
   }
 
@@ -464,54 +594,116 @@ class _HomeScreenState extends State<HomeScreen> {
     1er GENERATE AC : Demande l’ARQC (pour online) ou génère le TC (offline).
 
     2nd GENERATE AC : Confirme le résultat (accepté ou refusé) auprès de la carte. */
-
   Future<void> secondGenerateAc({
     required bool authorized,
-    required List<TLV> aidResponseTlvs,
+    List<TLV>? recordTlvs,
   }) async {
     try {
-      // Choix du type d'AC (Application Cryptogram)
-      final acType =
-          authorized ? 0x00 : 0x80; // 0x00 = TC (approuvé), 0x80 = AAC (refusé)
+      final acType = authorized ? 0x40 : 0x80;
+
+      List<int> cdol2Data = [];
+
+      TLV? cdol2Tlv;
+      if (recordTlvs != null) {
+        for (final record in recordTlvs) {
+          cdol2Tlv = TLVParser.findTlvRecursive([record], 0x8D);
+          if (cdol2Tlv != null) {
+            print('✅ CDOL2 trouvé pour second GENERATE AC.');
+            break;
+          }
+        }
+      }
+
+      if (cdol2Tlv != null) {
+        final cdol2 = cdol2Tlv.value;
+        int idx = 0;
+        while (idx < cdol2.length) {
+          int firstByte = cdol2[idx];
+          String tag = '';
+          if ((firstByte & 0x1F) == 0x1F) {
+            tag =
+                cdol2[idx].toRadixString(16).padLeft(2, '0') +
+                cdol2[idx + 1].toRadixString(16).padLeft(2, '0');
+            idx += 2;
+          } else {
+            tag = cdol2[idx].toRadixString(16).padLeft(2, '0');
+            idx += 1;
+          }
+          tag = tag.toUpperCase();
+          final length = cdol2[idx];
+          idx += 1;
+
+          print(
+            '🔎 Tag CDOL2 trouvé pour second AC : $tag, longueur : $length',
+          );
+
+          switch (tag) {
+            case '91':
+              cdol2Data.addAll([
+                0x67,
+                0x9A,
+                0xEF,
+                0x7F,
+                0x00,
+                0x82,
+                0x00,
+                0x00,
+              ]);
+              break;
+            case '8A':
+              cdol2Data.addAll([0x30, 0x30]); // "00" en ASCII
+              break;
+            case '95':
+              cdol2Data.addAll([0x00, 0x00, 0x00, 0x00, 0x02]);
+              break;
+            case '9F37':
+              cdol2Data.addAll([0x30, 0x90, 0x1B, 0x6A]);
+              break;
+            default:
+              cdol2Data.addAll(List.filled(length, 0x00));
+              break;
+          }
+        }
+      } else {
+        print('ℹ️ Aucun CDOL2 trouvé → remplissage par défaut.');
+        cdol2Data = [
+          0x67, 0x9A, 0xEF, 0x7F, 0x00, 0x82, 0x00, 0x00, // 91
+          0x30, 0x30, // 8A
+          0x00, 0x00, 0x00, 0x00, 0x02, // 95
+          0x30, 0x90, 0x1B, 0x6A, // 9F37
+        ];
+      }
+
+      // ✅ Maintenant envoyer le Second GENERATE AC
 
       final generateAcCommand = [
-        0x80, // CLA : Class of instruction
-        0xAE, // INS : Instruction code (GENERATE AC)
-        acType, // P1 : Type d'AC demandé
-        0x00, // P2
-        0x00, // Lc : 0 car pas de CDOL2
+        0x00, // PAS 0x80 → mettre 0x00 au lieu de 0x80 ici !!
+        0xAE,
+        acType,
+        0x00,
+        cdol2Data.length,
+        ...cdol2Data,
+        0x00,
       ];
 
       final generateAcHex =
           generateAcCommand
               .map((e) => e.toRadixString(16).padLeft(2, '0'))
-              .join(); // Transforme en string hexadécimal
-      print('📤 Second GENERATE AC : $generateAcHex');
+              .join();
+      print('📤 Second GENERATE AC (avec CDOL2) : $generateAcHex');
 
-      // Envoi de la commande APDU
-      final responseHex = await FlutterNfcKit.transceive(generateAcHex);
-      print('📥 Réponse du second GENERATE AC : $responseHex');
+      String? responseHex;
+      try {
+        responseHex = await FlutterNfcKit.transceive(generateAcHex);
+        print('📥 Réponse Second Generate AC : $responseHex');
+      } catch (e) {
+        print('❌ Erreur durant transceive : $e');
+        await FlutterNfcKit.finish();
+        return;
+      }
 
-      // Traitement de la réponse
-      final responseBytesList = _hexToBytes(responseHex);
-      final responseBytes = Uint8List.fromList(responseBytesList);
-      final responseTlvs = TLVParser.parse(responseBytes);
+      await FlutterNfcKit.finish();
 
-      // ➡️ (Optionnel) Tu peux extraire ici ATC, CID, etc. en utilisant findTlvRecursive
-      // Exemple d'extraction (pas obligatoire si tu ne l'utilises pas maintenant) :
-      /*
-    final atcTlv = TLVParser.findTlvRecursive(
-      responseTlvs,
-      0x9F36,
-    ) ?? TLV(0x00, Uint8List(0));
-
-    if (atcTlv.tag == 0x9F36) {
-      final atc = atcTlv.value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-      print('🔢 ATC (second AC) : $atc');
-    }
-    */
-
-      // ➡️ Mise à jour du résultat
       setState(() {
         result =
             authorized
@@ -519,9 +711,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 : '❌ Transaction refusée après second GENERATE AC';
       });
 
-      await FlutterNfcKit.finish();
-
-      // ➡️ Historisation de la transaction
       final log = TransactionLog(
         pan: pan,
         expiration: expiration,
@@ -535,14 +724,13 @@ class _HomeScreenState extends State<HomeScreen> {
       transactionLogs.add(log);
       await TransactionStorage.saveTransactions(transactionLogs);
 
-      // ➡️ Affichage du reçu
       Navigator.pushReplacementNamed(
         context,
         '/transactionDetail',
         arguments: log,
       );
     } catch (e) {
-      print('❌ Erreur lors du second GENERATE AC : $e');
+      print('❌ Erreur lors du second GENERATE AC corrigé : $e');
     }
   }
 
@@ -570,49 +758,49 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   bool _verifySDASignature(
-    Uint8List signature, // Signature à vérifier (RSA sur données statiques)
-    Uint8List staticData, // Données originales (PAN + Expiration…)
-    String aidHex, // AID de l’application (pour trouver le RID)
-    List<TLV> aidResponseTlvs, // TLVs de la réponse SELECT AID
+    Uint8List signature,
+    Uint8List staticData,
+    String aidHex,
+    List<TLV> aidResponseTlvs,
   ) {
     try {
-      final String rid = aidHex.substring(
-        0,
-        10,
-      ); // Récupère le RID (5 octets hex)
+      final String rid = aidHex.substring(0, 10);
 
-      // 🔍 Récupère le CAPK Index (Tag 9F22) en utilisant findTlvRecursive
       final capkTlv =
           TLVParser.findTlvRecursive(aidResponseTlvs, 0x9F22) ??
           TLV(0x00, Uint8List(0));
-
       final capkIndex =
           capkTlv.value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-      // Recherche de la clé publique CAPK correspondante
       final capk = findCapk(rid, capkIndex);
       if (capk == null) {
         print('❌ CAPK introuvable pour RID $rid avec index $capkIndex');
         return false;
       }
 
-      // Déchiffrement de la signature avec la clé publique
       final encrypter = encrypt.Encrypter(
         encrypt.RSA(publicKey: capk, encoding: encrypt.RSAEncoding.PKCS1),
       );
 
       final decrypted = encrypter.decryptBytes(encrypt.Encrypted(signature));
 
-      // Vérification : on compare les dernières données déchiffrées aux staticData
-      final decryptedStaticData = decrypted.sublist(
-        decrypted.length - staticData.length,
+      final decryptedStaticData = Uint8List.fromList(
+        decrypted.sublist(decrypted.length - staticData.length),
       );
 
-      return decryptedStaticData.toString() == staticData.toString();
+      return _areUint8ListsEqual(decryptedStaticData, staticData);
     } catch (e) {
       print('❌ Erreur lors de la vérification SDA : $e');
       return false;
     }
+  }
+
+  bool _areUint8ListsEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   // 📘 Étapes 1 à 13 : Processus EMV complet
@@ -726,6 +914,39 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
+      // 📤 Commande : Exchange Relay Resistance
+      final exchangeRelayResistanceCommand = [
+        0x80, // CLA (propriétaire)
+        0x50, // INS = Exchange Relay Resistance
+        0x00, // P1
+        0x00, // P2
+        0x02, // Lc (2 octets)
+        0x80, 0x00, // Data : paramètres relay resistance
+        0x00, // Le (réponse attendue)
+      ];
+
+      final exchangeRelayResistanceHex =
+          exchangeRelayResistanceCommand
+              .map((e) => e.toRadixString(16).padLeft(2, '0'))
+              .join();
+
+      try {
+        final exchangeRelayResponse = await FlutterNfcKit.transceive(
+          exchangeRelayResistanceHex,
+        );
+        print('📥 Réponse Exchange Relay Resistance : $exchangeRelayResponse');
+
+        // 🧠 Tu peux même checker ici si la réponse finit par '9000'
+        if (exchangeRelayResponse.endsWith('9000')) {
+          print('✅ Relay Resistance échangé avec succès.');
+        } else {
+          print('⚠️ Réponse inattendue : $exchangeRelayResponse');
+          // Tu continues malgré tout, pas d'arrêt ici
+        }
+      } catch (e) {
+        print('⚠️ Exchange Relay Resistance non supporté (continuer) : $e');
+      }
+
       /*qu’est-ce que le PDOL et le GPO ?
           PDOL (Processing Options Data Object List) → C’est une liste de données que la carte attend du terminal avant de démarrer le traitement.
 
@@ -781,7 +1002,8 @@ class _HomeScreenState extends State<HomeScreen> {
           if (tag == '9F02') {
             // Montant de la transaction
             int transactionAmount =
-                (double.tryParse(amount) ?? 0 * 100).toInt();
+                ((double.tryParse(amount) ?? 0) * 100).toInt();
+
             final amountHex = transactionAmount
                 .toRadixString(16)
                 .padLeft(length * 2, '0');
@@ -891,6 +1113,8 @@ class _HomeScreenState extends State<HomeScreen> {
       String fullPan = '';
 
       // 📖 Lecture des enregistrements
+      List<TLV> readRecords = [];
+
       for (int i = 0; i < afl.length; i += 4) {
         final sfi = afl[i] >> 3; // Extraction du SFI (Short File Identifier)
         final recordStart = afl[i + 1]; // Premier record à lire
@@ -927,62 +1151,290 @@ class _HomeScreenState extends State<HomeScreen> {
 
             // Parsing TLV de la réponse
             final recordTlvs = TLVParser.parse(recordBytes);
+            print(
+              'coucouuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu  reeecorddddd:$recordTlvs',
+            );
+            readRecords.addAll(recordTlvs);
+
+            for (var tlv in recordTlvs) {
+              print(
+                '🔍 TLV trouvé : Tag=0x${tlv.tag.toRadixString(16)}, Valeur=${Hex.encode(tlv.value)}',
+              );
+            }
+
+            /// 🔵 Fonction pour créer ta clé publique à partir du Modulus et Exponent
+            pc.RSAPublicKey createPublicKey() {
+              final modulus = BigInt.parse(
+                'C2FA4312E3B5174838241FAC87D9A46B984BC45A88A71979823852D3F6C65708C78BC742C0595108C6679EF52BEC7AE4D3D13F776876430982AAA38125629CF9CE22029C65CA4F4C5C9F34D8A2CF704846937A2C7695D58324BDF3092521511FE29FD8872FC7A1E2C76A82B6DD691DA4468B1331793800635F7D622723987CEA6AD6DA0AB489D0637A3663DF0E5364662119CE2CF76C96894D623E0BF36CEED3330C84EC7353DA1AD064C8095F162841',
+                radix: 16,
+              );
+
+              final exponent = BigInt.parse(
+                '03',
+                radix: 16,
+              ); // Exponent classique RSA
+              return pc.RSAPublicKey(modulus, exponent);
+            }
+
+            // Déchiffrer une signature RSA
+            Uint8List _decryptRSA(
+              Uint8List cipherText,
+              pc.RSAPublicKey publicKey,
+            ) {
+              final engine =
+                  RSAEngine()..init(
+                    false,
+                    pc.PublicKeyParameter<pc.RSAPublicKey>(publicKey),
+                  );
+              return engine.process(cipherText);
+            }
+
+            /// 🔵 Petite fonction utilitaire pour convertir des bytes en hex
+            String _bytesToHex(Uint8List bytes) {
+              return bytes
+                  .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                  .join();
+            }
+
+            /// 🔵 Petite fonction utilitaire pour comparer deux listes de bytes
+            bool _compareBytes(List<int> a, List<int> b) {
+              if (a.length != b.length) return false;
+              for (int i = 0; i < a.length; i++) {
+                if (a[i] != b[i]) return false;
+              }
+              return true;
+            }
+
+            /// 🟠 Fonction pour vérifier le résultat du DDA
+            void verifyDDA(
+              Uint8List decryptedData,
+              Uint8List unpredictableNumber,
+            ) {
+              if (decryptedData.isEmpty) {
+                print('❌ Donnée vide, pas de signature DDA.');
+                return;
+              }
+
+              print('✅ Donnée décryptée DDA : ${_bytesToHex(decryptedData)}');
+
+              // Vérification de base
+              if (decryptedData[0] != 0x6A) {
+                print(
+                  '❌ Format incorrect : Le premier octet attendu est 0x6A.',
+                );
+                return;
+              }
+
+              // Vérification si le UN est retrouvé
+              bool unFound = false;
+              for (
+                int i = 0;
+                i < decryptedData.length - unpredictableNumber.length;
+                i++
+              ) {
+                if (_compareBytes(
+                  decryptedData.sublist(i, i + unpredictableNumber.length),
+                  unpredictableNumber,
+                )) {
+                  unFound = true;
+                  break;
+                }
+              }
+
+              if (unFound) {
+                print('✅ Unpredictable Number retrouvé dans la signature DDA.');
+              } else {
+                print(
+                  '❌ Unpredictable Number PAS retrouvé dans la signature DDA.',
+                );
+              }
+            }
+
+            // 🔵 Fonction utilitaire pour comparer deux listes de bytes
+
+            // 📤 Fonction complète Internal Authenticate (DDA)
+            Future<void> performInternalAuthenticate(
+              List<TLV> aidResponseTlvs,
+              String aidHex,
+            ) async {
+              try {
+                final unpredictableNumber = _hexToBytes('B9467AAA');
+
+                final internalAuthenticate = [
+                  0x00,
+                  0x88,
+                  0x00,
+                  0x00,
+                  unpredictableNumber.length,
+                  ...unpredictableNumber,
+                  0x00,
+                ];
+
+                final internalAuthenticateHex =
+                    internalAuthenticate
+                        .map((e) => e.toRadixString(16).padLeft(2, '0'))
+                        .join();
+
+                print(
+                  '📤 Envoi Internal Authenticate : $internalAuthenticateHex',
+                );
+
+                final responseHex = await FlutterNfcKit.transceive(
+                  internalAuthenticateHex,
+                );
+                print('📥 Réponse Internal Authenticate : $responseHex');
+
+                final responseBytesList = _hexToBytes(responseHex);
+                final responseBytes = Uint8List.fromList(responseBytesList);
+
+                final parsedTlvs = TLVParser.parse(responseBytes);
+                final tlv9F4B = TLVParser.findTlvRecursive(parsedTlvs, 0x9F4B);
+
+                if (tlv9F4B == null) {
+                  print('❌ Pas de 9F4B trouvé.');
+                  return;
+                }
+
+                final signature = tlv9F4B.value;
+                print('✅ Signature trouvée : ${Hex.encode(signature)}');
+
+                final rid = aidHex.substring(0, 10);
+                final capkTlv = TLVParser.findTlvRecursive(
+                  aidResponseTlvs,
+                  0x9F22,
+                );
+                if (capkTlv == null) {
+                  print('❌ Pas de CAPK Index trouvé (9F22).');
+                  return;
+                }
+                final capkIndex =
+                    capkTlv.value
+                        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                        .join();
+                final capk = findCapk(rid, capkIndex);
+                if (capk == null) {
+                  print('❌ CAPK introuvable pour RID $rid et index $capkIndex');
+                  return;
+                }
+
+                final decryptor =
+                    RSAEngine()
+                      ..init(false, PublicKeyParameter<RSAPublicKey>(capk));
+                final decryptedData = decryptor.process(signature);
+
+                print(
+                  '✅ Signature DDA décryptée : ${Hex.encode(decryptedData)}',
+                );
+
+                bool unFound = false;
+                for (
+                  int i = 0;
+                  i <= decryptedData.length - unpredictableNumber.length;
+                  i++
+                ) {
+                  if (_compareBytes(
+                    decryptedData.sublist(i, i + unpredictableNumber.length),
+                    unpredictableNumber,
+                  )) {
+                    unFound = true;
+                    break;
+                  }
+                }
+
+                if (unFound) {
+                  print('✅ L’Unpredictable Number est présent : DDA réussi.');
+                } else {
+                  print(
+                    '❌ L’Unpredictable Number n\'a pas été retrouvé : DDA échec.',
+                  );
+                }
+              } catch (e) {
+                print('❌ Erreur Internal Authenticate : $e');
+              }
+            }
 
             /* La réponse de la carte contient souvent :
-     - PAN (tag 5A)
-     - Expiration (tag 5F24)
-     - Nom du titulaire (tag 5F20)
-     - Signature SDA (tag 93)
-     - Autres données utiles (CVM List, ATC, AC, etc.)
-  */
+          - PAN (tag 5A)
+          - Expiration (tag 5F24)
+          - Nom du titulaire (tag 5F20)
+          - Signature SDA (tag 93)
+          - Autres données utiles (CVM List, ATC, AC, etc.)
+
+          récupères plusieurs réponses au format TLV, et dans chacune il y a un 70.
+
+          Chaque 70 contient des sous-tags différents.
+
+          Certains 70 auront PAN, Exp,
+
+          D'autres 70 auront 9F1A, SDA, etc.
+
+          Donc TU DOIS analyser TOUS les 70, pas un seul.
+        */
 
             // ✅ Étape 6 : Extraction des données
 
-            // Extraction du code pays (tag 9F1A)
-            final countryCodeTlv =
-                TLVParser.findTlvRecursive(recordTlvs, 0x9F1A) ??
-                TLV(0x00, Uint8List(0)); // TLV vide si pas trouvé
+            // Initialiser les TLVs vides
+            TLV panTlv = TLV(0x00, Uint8List(0));
+            TLV expTlv = TLV(0x00, Uint8List(0));
+            TLV countryCodeTlv = TLV(0x00, Uint8List(0));
+            TLV sdaTlv = TLV(0x00, Uint8List(0));
 
-            if (countryCodeTlv.tag == 0x9F1A) {
-              cardCountryCode =
-                  countryCodeTlv.value
-                      .map((b) => b.toRadixString(16).padLeft(2, '0'))
-                      .join(); // Convertit les bytes en string hex
+            // Initialiser staticData
+            final staticData = <int>[];
+
+            // Parcourir les records pour chercher dans tous les 70
+            for (final recordTlv in recordTlvs) {
+              if (recordTlv.tag == 0x70) {
+                final subTlvs = TLVParser.parse(recordTlv.value);
+
+                // PAN
+                final foundPan = TLVParser.findTlvRecursive(subTlvs, 0x5A);
+                if (foundPan != null && panTlv.tag != 0x5A) {
+                  panTlv = foundPan;
+                  staticData.addAll(panTlv.value);
+                  print('✅ PAN trouvé : ${Hex.encode(panTlv.value)}');
+                }
+
+                // Expiration
+                final foundExp = TLVParser.findTlvRecursive(subTlvs, 0x5F24);
+                if (foundExp != null && expTlv.tag != 0x5F24) {
+                  expTlv = foundExp;
+                  staticData.addAll(expTlv.value);
+                  print('✅ Expiration trouvée : ${Hex.encode(expTlv.value)}');
+                }
+
+                // CountryCode
+                final foundCountry = TLVParser.findTlvRecursive(
+                  subTlvs,
+                  0x5f28,
+                );
+                if (foundCountry != null && countryCodeTlv.tag != 0x5f28) {
+                  countryCodeTlv = foundCountry;
+                  staticData.addAll(countryCodeTlv.value);
+                  cardCountryCode =
+                      countryCodeTlv.value
+                          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                          .join();
+                  print('✅ Country trouvé : $cardCountryCode');
+                }
+
+                // SDA
+                final foundSda = TLVParser.findTlvRecursive(subTlvs, 0x93);
+                if (foundSda != null && foundSda.tag == 0x93) {
+                  sdaTlv = foundSda;
+                  print('✅ SDA trouvée : ${Hex.encode(sdaTlv.value)}');
+                } else {
+                  print(
+                    'ℹ️ Aucun SDA trouvé : la carte utilise peut-être DDA ou CDA',
+                  );
+                }
+              }
             }
 
-            // Extraction de la signature SDA (tag 93)
-            final sdaTlv =
-                TLVParser.findTlvRecursive(recordTlvs, 0x93) ??
-                TLV(0x00, Uint8List(0));
-
+            // Vérification de la signature SDA
             if (sdaTlv.tag == 0x93) {
-              // Si signature trouvée
-              final signature = Uint8List.fromList(
-                sdaTlv.value,
-              ); // Signature extraite
-              final staticData = <int>[]; // Static Data vide
+              final signature = Uint8List.fromList(sdaTlv.value);
 
-              // Extraction du PAN (tag 5A)
-              final panTlv =
-                  TLVParser.findTlvRecursive(recordTlvs, 0x5A) ??
-                  TLV(0x00, Uint8List(0));
-              if (panTlv.tag == 0x5A) {
-                staticData.addAll(
-                  panTlv.value,
-                ); // Ajoute le PAN aux données statiques
-              }
-
-              // Extraction de la date d'expiration (tag 5F24)
-              final expTlv =
-                  TLVParser.findTlvRecursive(recordTlvs, 0x5F24) ??
-                  TLV(0x00, Uint8List(0));
-              if (expTlv.tag == 0x5F24) {
-                staticData.addAll(
-                  expTlv.value,
-                ); // Ajoute la date d'expiration aux données statiques
-              }
-
-              // Vérification de la signature SDA si staticData n'est pas vide
               if (staticData.isNotEmpty) {
                 final isValid = _verifySDASignature(
                   signature,
@@ -991,7 +1443,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   aidResponseTlvs,
                 );
 
-                // Si la signature est invalide
                 if (!isValid) {
                   setState(() {
                     result = '❌ Signature SDA invalide : transaction refusée';
@@ -999,6 +1450,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   return;
                 }
               }
+            }
+            if (TLVParser.findTlvRecursive(recordTlvs, 0x93) == null) {
+              print('ℹ️ DDA non supporté par la carte, skip.');
+            } else {
+              await performInternalAuthenticate(aidResponseTlvs, aidHex);
             }
 
             // 📘 Étape 7 : Traitement de la CVM List (tag 8E)
@@ -1016,24 +1472,35 @@ class _HomeScreenState extends State<HomeScreen> {
                  La carte peut proposer plusieurs méthodes, classées par ordre de priorité. */
 
             Future<bool> checkCvmCondition(int conditionCode) async {
-              // Chaque méthode CVM est associée à une condition.Cette fonction vérifie si la condition est remplie.
-
               final montant =
-                  (double.tryParse(amount) ?? 0) * 100; // Montant en centimes
+                  (double.tryParse(amount) ?? 0) *
+                  100; // Montant en centimes, multiplié par 100 pour éviter des erreurs de précision
 
               switch (conditionCode) {
-                case 0x00: // Always
+                case 0x00: // Toujours
                   return true;
-                case 0x01: // If amount > floorLimit
-                  return montant > floorLimit;
-                case 0x02: // If amount <= floorLimit
-                  return montant <= floorLimit;
+                case 0x01: // Si le montant > seuil
+                  if (montant > floorLimit) {
+                    print('✅ Condition CVM : Montant supérieur au seuil');
+                    return true;
+                  }
+                  break;
+                case 0x02: // Si le montant <= seuil
+                  if (montant <= floorLimit) {
+                    print(
+                      '✅ Condition CVM : Montant inférieur ou égal au seuil',
+                    );
+                    return true;
+                  }
+                  break;
                 default:
                   print(
                     '⚠️ Condition CVM inconnue : 0x${conditionCode.toRadixString(16)}',
                   );
                   return false;
               }
+              print('❌ Condition CVM échouée pour le montant de $montant');
+              return false; // Si la condition échoue, on renvoie false
             }
 
             final rid = aidHex.substring(
@@ -1051,6 +1518,46 @@ class _HomeScreenState extends State<HomeScreen> {
                     .map((b) => b.toRadixString(16).padLeft(2, '0'))
                     .join(); // Convertit en string hexadécimale
 
+            Future<void> sendOnlinePin(String pin) async {
+              if (pin.isEmpty) {
+                setState(() {
+                  result = '❌ PIN vide, impossible de continuer';
+                });
+                throw Exception('PIN vide');
+              }
+
+              // Affiche un message indiquant que l'envoi du PIN en ligne est en cours.
+              setState(() {
+                result = '🔄 Envoi du PIN pour validation en ligne...';
+              });
+
+              try {
+                // Simulation d'un délai pour envoyer le PIN (attente pour un serveur d'autorisation)
+                await Future.delayed(const Duration(seconds: 2));
+
+                // Simule la validation du PIN en ligne (remplace avec ton appel serveur réel)
+                bool isPinValid =
+                    true; // Remplace par une validation réelle via serveur ou HSM
+
+                if (isPinValid) {
+                  // Si le PIN est validé, on passe à l'étape suivante de la transaction.
+                  setState(() {
+                    result = '✅ PIN validé en ligne';
+                    transactionReference =
+                        'TRN${DateTime.now().millisecondsSinceEpoch}';
+                    authorizationCode =
+                        'AUTH1234'; // Code d'autorisation simulé
+                  });
+                  print('✅ PIN validé en ligne');
+                }
+              } catch (e) {
+                setState(() {
+                  result = '❌ Erreur d\'envoi du PIN en ligne : $e';
+                });
+                print('❌ Erreur d\'envoi du PIN en ligne : $e');
+              }
+            }
+
             Future<bool> processCvmList(List<int> cvmList) async {
               int idx = 0;
 
@@ -1060,66 +1567,39 @@ class _HomeScreenState extends State<HomeScreen> {
                 idx += 2;
 
                 final bool conditionOk = await checkCvmCondition(conditionCode);
-                /*Que fait cette boucle ?
-                  La liste cvmList vient du tag 8E (CVM List) sur la carte.
-
-                  Chaque paire de deux octets représente :
-
-                  cvmCode: méthode de vérification.
-
-                  conditionCode: condition pour appliquer cette méthode.
-
-                   La carte propose plusieurs méthodes, par exemple :
-
-
-                  CVM Code	Méthode	Condition Code
-                  0x01	PIN offline vérifié	0x01 (si > floorLimit)
-                  0x1E	Aucune vérification	0x02 (si ≤ floorLimit) */
-
                 if (conditionOk) {
-                  //Si condition remplie
-                  // Applique la méthode CVM trouvée
-                  if (cvmCode == 0x00) {
-                    //Fail CVM processing → Refuser
-                    setState(
-                      () => result = '❌ CVM échoué : transaction refusée',
-                    );
-                    return false;
-                  } else if (cvmCode == 0x01) {
-                    //PIN offline plaintext
-                    final pin = await _demanderPin();
-                    await sendOfflinePlaintextPin(pin);
-                    return true;
-                  } else if (cvmCode == 0x02) {
-                    //PIN offline ciphertext
-                    final pin = await _demanderPin();
-                    await sendOfflineEncryptedPin(
-                      pin,
-                      rid,
-                      capkIndex,
-                    ); // À développer si tu veux supporter encrypted
-                    return true;
-                  } else if (cvmCode == 0x1E) {
-                    //No CVM required
-                    print('✅ Pas de CVM requis pour cette carte.');
-                    return true;
-                  } else if (cvmCode == 0x03) {
-                    // 0x03 = PIN Online
-                    final pin =
-                        await _demanderPin(); // Tu as déjà cette fonction
-
-                    // Stocke ce PIN pour l'envoyer à la banque
-                    setState(() => authorizationCode = pin);
-                    print('✅ PIN Online saisi : $pin');
-                    return true;
-                  } else if (cvmCode == 0x1F) {
-                    //Signature
-                    print('⚠️ Signature requise (non implémentée).');
-                    return true;
+                  switch (cvmCode) {
+                    case 0x00: // Toujours
+                      print('✅ Méthode CVM: Pas de CVM requise');
+                      return true; // Si aucune condition n'est remplie, on continue avec la transaction
+                    case 0x01: // PIN offline en texte clair
+                      final pin = await _demanderPin();
+                      await sendOfflinePlaintextPin(pin);
+                      return true;
+                    case 0x02: // PIN offline chiffré
+                      final pin = await _demanderPin();
+                      await sendOfflineEncryptedPin(pin, rid, capkIndex);
+                      return true;
+                    case 0x03: // PIN en ligne
+                      final pin = await _demanderPin();
+                      await sendOnlinePin(pin); // Envoi PIN en ligne
+                      return true;
+                    case 0x1E: // Pas de CVM requis
+                      print('✅ Pas de CVM requis');
+                      return true;
+                    case 0x1F: // Signature
+                      print('⚠️ Signature requise (fonction non implémentée)');
+                      return true;
+                    default:
+                      setState(() {
+                        result =
+                            '❌ CVM inconnu : 0x${cvmCode.toRadixString(16)}';
+                      });
+                      print('⚠️ CVM non supporté ou inconnu.');
+                      return false;
                   }
                 }
               }
-
               // Si aucune condition remplie → refuser
               setState(
                 () =>
@@ -1139,11 +1619,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
             // 🔍 Recherche de la CVM List (Tag 8E) dans la réponse GPO
             final cvmTlv =
-                TLVParser.findTlvRecursive(gpoTlvs, 0x8E) ??
-                TLV(0x00, Uint8List(0)); // TLV vide si pas trouvé
+                TLVParser.findTlvRecursive(recordTlvs, 0x8E) ??
+                TLV(0x00, Uint8List(0));
+            // TLV vide si pas trouvé
 
             if (cvmTlv.tag == 0x8E) {
               final cvmList = cvmTlv.value;
+              print('cvm value $cvmList ');
 
               // Appelle la fonction pour traiter la CVM List
               final success = await processCvmList(cvmList);
@@ -1158,12 +1640,6 @@ class _HomeScreenState extends State<HomeScreen> {
               Les données de la carte (PAN, expiration, nom…).
 
               Les informations d’authentification (AC, ATC, CID…). */
-            var extractedCardData = extractCardData(
-              recordTlvs,
-            ); //extractCardData : va chercher les tags :5A : PAN (Primary Account Number).5F24 : Date d’expiration.5F20 : Nom du titulaire de la carte.
-            var extractedAuthData = extractAuthData(
-              recordTlvs,
-            ); //extractAuthData : va chercher les tags :9F26 : AC (Application Cryptogram).9F36 : ATC (Application Transaction Counter).9F27 : CID (Cryptogram Information Data).
 
             // Vérification si les données sensibles sont présentes et non vides avant de les crypter
             /*Si une de ces trois valeurs (AC, ATC, CID) est absente, la transaction ne peut pas continuer.
@@ -1174,34 +1650,6 @@ class _HomeScreenState extends State<HomeScreen> {
               Vérifier l’intégrité des calculs.
 
               Faire les calculs cryptographiques dans le protocole EMV. */
-            if ((extractedAuthData.containsKey('ac') &&
-                    extractedAuthData['ac']!.isNotEmpty) &&
-                (extractedAuthData.containsKey('atc') &&
-                    extractedAuthData['atc']!.isNotEmpty) &&
-                (extractedAuthData.containsKey('cid') &&
-                    extractedAuthData['cid']!.isNotEmpty)) {
-              //Traitement des données (si OK)
-              final fullPan =
-                  extractedCardData['pan'] ??
-                  ''; // 🟢 On garde le vrai PAN complet
-
-              setState(() {
-                pan =
-                    'XXXX-XXXX-XXXX-${fullPan.substring(fullPan.length - 4)}'; // 🔒 Masquage pour l’affichage  (bonnes pratiques de sécurité) :
-                expiration =
-                    extractedCardData['expiration'] ??
-                    ''; // Récupération de l’expiration et du nom (si présents)
-                name = extractedCardData['name'] ?? '';
-                // Les données sensibles AC, ATC, CID sont chiffrées avant de les stocker (fonction encryptData).
-                ac = encryptData(extractedAuthData['ac'] ?? '');
-                atc = encryptData(extractedAuthData['atc'] ?? '');
-                cid = encryptData(extractedAuthData['cid'] ?? '');
-              });
-            } else {
-              //Si une donnée manque
-              setState(() => result = '⚠️ Données sensibles manquantes');
-              return; // Sortir de la fonction si les données sensibles sont manquantes
-            }
           } catch (_) {
             // En cas d’erreur pendant la lecture
             setState(() => result = '⚠️ Erreur lors de la lecture du record');
@@ -1209,8 +1657,6 @@ class _HomeScreenState extends State<HomeScreen> {
           }
         }
       }
-
-      await FlutterNfcKit.finish(); //Libération propre de la session NFC → on termines la communication avec la carte.
 
       // 📘 Étape 8 : Analyse du CID avec déchiffrement
       final rawCid = decryptData(
@@ -1236,7 +1682,8 @@ class _HomeScreenState extends State<HomeScreen> {
       00	Non            	ONLINE_REQUESTED
       Autre	-             	UNKNOWN */
 
-      await _generateAc(taaDecision, aidResponseTlvs, fullPan);
+      await generateAcFixed(taaDecision, readRecords, fullPan);
+
       /*Cela envoie la commande GENERATE AC à la carte,
         pour confirmer la décision :
 
@@ -1247,6 +1694,7 @@ class _HomeScreenState extends State<HomeScreen> {
         Refus : produire un AAC.
 
         */
+      await FlutterNfcKit.finish(); //Libération propre de la session NFC → on termines la communication avec la carte.
 
       if (ac.isNotEmpty && rawCid.isNotEmpty) {
         // Si les données sont bien présentes (AC + CID)
@@ -1304,6 +1752,14 @@ class _HomeScreenState extends State<HomeScreen> {
     // Vérifie que le montant contient uniquement des chiffres et un séparateur décimal
     final regex = RegExp(r'^\d+(\.\d{1,2})?$');
     return regex.hasMatch(amount);
+  }
+
+  String safeEncrypt(String? data) {
+    if (data == null || data.isEmpty) {
+      print('⚠️ Donnée vide, pas de chiffrement appliqué.');
+      return '';
+    }
+    return encryptData(data);
   }
 
   // 📘 Fonction pour valider les données avant de les crypter/déchiffrer
@@ -1456,7 +1912,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       // 🗺️ Vérification du pays
-      const terminalCountryCode = '056'; // Ex. 056 pour l’Algérie
+      const terminalCountryCode = '0012'; // Ex. 056 pour l’Algérie
       if (cardCountryCode != terminalCountryCode) {
         //Forcer online
         result = '🌍 Carte d’un autre pays → Autorisation en ligne requise';
